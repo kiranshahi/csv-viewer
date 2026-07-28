@@ -1,6 +1,13 @@
 "use client";
 
-import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+import {
+  ChangeEvent,
+  DragEvent,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type Cell = string;
 type SortState = { column: number; direction: "asc" | "desc" } | null;
@@ -72,6 +79,7 @@ export default function Home() {
   const [pageSize, setPageSize] = useState(10);
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
+  const [expanded, setExpanded] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const headers = rows[0] ?? [];
@@ -111,6 +119,18 @@ export default function Home() {
     (currentPage - 1) * pageSize,
     currentPage * pageSize,
   );
+
+  useEffect(() => {
+    function handleEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setExpanded(false);
+    }
+    document.addEventListener("keydown", handleEscape);
+    document.body.classList.toggle("viewer-expanded", expanded);
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+      document.body.classList.remove("viewer-expanded");
+    };
+  }, [expanded]);
 
   function loadText(text: string, name: string) {
     const parsed = parseCSV(text.replace(/^\uFEFF/, ""));
@@ -278,7 +298,7 @@ export default function Home() {
           </div>
         </section>
       ) : (
-        <section className="viewer">
+        <section className={`viewer ${expanded ? "is-expanded" : ""}`}>
           <div className="viewer-heading">
             <div>
               <p className="eyebrow">YOUR DATA</p>
@@ -289,6 +309,15 @@ export default function Home() {
               </p>
             </div>
             <div className="viewer-actions">
+              <button
+                className="secondary expand-button"
+                onClick={() => setExpanded((value) => !value)}
+                aria-pressed={expanded}
+                title={expanded ? "Exit expanded view (Esc)" : "Expand viewer"}
+              >
+                <span aria-hidden="true">{expanded ? "↙" : "↗"}</span>
+                {expanded ? "Collapse" : "Expand"}
+              </button>
               <button className="secondary" onClick={reset}>
                 Open another
               </button>

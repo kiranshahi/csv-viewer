@@ -300,6 +300,37 @@ main {
   padding: 55px 0 70px;
 }
 
+body.viewer-expanded {
+  overflow: hidden;
+}
+
+.viewer.is-expanded {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  width: 100%;
+  max-width: none;
+  height: 100dvh;
+  padding: 22px;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+
+.viewer.is-expanded .viewer-heading {
+  margin-bottom: 18px;
+}
+
+.viewer.is-expanded .viewer-heading h1 {
+  max-width: min(52vw, 720px);
+  font-size: clamp(30px, 3vw, 46px);
+}
+
+.viewer.is-expanded .table-shell {
+  flex: 1;
+  min-height: 0;
+}
+
 .viewer-heading {
   display: flex;
   align-items: flex-end;
@@ -334,6 +365,13 @@ main {
   display: flex;
   gap: 10px;
   flex-shrink: 0;
+}
+
+.expand-button span {
+  display: inline-block;
+  margin-right: 7px;
+  color: var(--coral);
+  font-size: 16px;
 }
 
 .primary.compact {
@@ -579,6 +617,15 @@ footer {
 
   .viewer {
     padding-top: 38px;
+  }
+
+  .viewer.is-expanded {
+    width: 100%;
+    padding: 14px;
+  }
+
+  .viewer.is-expanded .viewer-heading h1 {
+    max-width: 100%;
   }
 
   .viewer-heading {
