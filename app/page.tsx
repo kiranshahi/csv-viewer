@@ -19,6 +19,23 @@ type EditAction = {
 };
 type EditingCell = { row: number; column: number; value: string } | null;
 type ExportFormat = "csv" | "json" | "markdown" | "html" | "sql";
+type FilterOperator =
+  | "contains"
+  | "equals"
+  | "starts"
+  | "empty"
+  | "not-empty"
+  | "greater"
+  | "less"
+  | "between";
+type ColumnFilter = {
+  operator: FilterOperator;
+  value: string;
+  valueTo: string;
+};
+type ToolTab = "clean" | "compare" | "summary";
+type CleanAction = "trim" | "upper" | "lower" | "title" | "fill" | "replace";
+type Aggregate = "count" | "sum" | "average" | "min" | "max";
 type ColumnStat = {
   index: number;
   name: string;
@@ -162,12 +179,16 @@ export default function Home() {
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<SortState>(null);
   const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(10);
+  const [pageSize, setPageSize] = useState(() => {
+    if (typeof window === "undefined") return 10;
+    const saved = Number(window.localStorage.getItem("csv-viewer-page-size"));
+    return [0, 10, 25, 50, 100].includes(saved) ? saved : 10;
+  });
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
-  const [columnFilters, setColumnFilters] = useState<Record<number, string>>({});
+  const [columnFilters, setColumnFilters] = useState<Record<number, ColumnFilter>>({});
   const [delimiterLabel, setDelimiterLabel] = useState("Comma");
   const [showInsights, setShowInsights] = useState(false);
   const [showChart, setShowChart] = useState(false);
@@ -179,28 +200,55 @@ export default function Home() {
   const [undoStack, setUndoStack] = useState<EditAction[]>([]);
   const [redoStack, setRedoStack] = useState<EditAction[]>([]);
   const [isProcessing, setIsProcessing] = useState(false);
+  const [showTools, setShowTools] = useState(false);
+  const [toolTab, setToolTab] = useState<ToolTab>("clean");
+  const [cleanColumn, setCleanColumn] = useState(0);
+  const [cleanAction, setCleanAction] = useState<CleanAction>("trim");
+  const [cleanFind, setCleanFind] = useState("");
+  const [cleanReplacement, setCleanReplacement] = useState("");
+  const [toolMessage, setToolMessage] = useState("");
+  const [comparisonRows, setComparisonRows] = useState<Cell[][]>([]);
+  const [comparisonName, setComparisonName] = useState("");
+  const [primaryKey, setPrimaryKey] = useState(0);
+  const [comparisonKey, setComparisonKey] = useState(0);
+  const [groupColumn, setGroupColumn] = useState(0);
+  const [aggregateColumn, setAggregateColumn] = useState(0);
+  const [aggregate, setAggregate] = useState<Aggregate>("count");
+  const [scrollTop, setScrollTop] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
+  const compareInputRef = useRef<HTMLInputElement>(null);
 
-  const headers = rows[0] ?? [];
-  const data = rows.slice(1);
+  const headers = useMemo(() => rows[0] ?? [], [rows]);
+  const data = useMemo(() => rows.slice(1), [rows]);
   const visibleColumns = headers
     .map((header, index) => ({ header, index }))
     .filter(({ index }) => !hiddenColumns.has(index));
 
   const filteredRows = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    const activeColumnFilters = Object.entries(columnFilters).filter(
-      ([, value]) => value.trim() !== "",
+    const activeColumnFilters = Object.entries(columnFilters).filter(([, filter]) =>
+      ["empty", "not-empty"].includes(filter.operator) || filter.value.trim() !== "",
     );
     const filtered = data.filter((row) => {
       const matchesSearch =
         !normalized ||
         row.some((value) => value.toLocaleLowerCase().includes(normalized));
-      const matchesColumns = activeColumnFilters.every(([column, value]) =>
-        (row[Number(column)] ?? "")
-          .toLocaleLowerCase()
-          .includes(value.trim().toLocaleLowerCase()),
-      );
+      const matchesColumns = activeColumnFilters.every(([column, filter]) => {
+        const raw = (row[Number(column)] ?? "").trim();
+        const value = raw.toLocaleLowerCase();
+        const target = filter.value.trim().toLocaleLowerCase();
+        if (filter.operator === "empty") return raw === "";
+        if (filter.operator === "not-empty") return raw !== "";
+        if (filter.operator === "equals") return value === target;
+        if (filter.operator === "starts") return value.startsWith(target);
+        if (filter.operator === "greater") return Number(raw) > Number(filter.value);
+        if (filter.operator === "less") return Number(raw) < Number(filter.value);
+        if (filter.operator === "between") {
+          const numeric = Number(raw);
+          return numeric >= Number(filter.value) && numeric <= Number(filter.valueTo);
+        }
+        return value.includes(target);
+      });
       return matchesSearch && matchesColumns;
     });
 
@@ -318,7 +366,9 @@ export default function Home() {
   const chartMaximum = Math.max(1, ...chartRows.map((item) => Math.abs(item.value)));
 
   const activeFilterCount = Object.values(columnFilters).filter(
-    (value) => value.trim() !== "",
+    (filter) =>
+      ["empty", "not-empty"].includes(filter.operator) ||
+      filter.value.trim() !== "",
   ).length;
 
   const pageCount =
@@ -326,18 +376,67 @@ export default function Home() {
       ? 1
       : Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const visibleRows =
+  const pagedRows =
     pageSize === 0
       ? filteredRows
       : filteredRows.slice(
           (currentPage - 1) * pageSize,
           currentPage * pageSize,
         );
+  const virtualize = pageSize === 0 && pagedRows.length > 150;
+  const virtualStart = virtualize ? Math.max(0, Math.floor(scrollTop / 48) - 8) : 0;
+  const virtualEnd = virtualize
+    ? Math.min(pagedRows.length, virtualStart + 40)
+    : pagedRows.length;
+  const visibleRows = pagedRows.slice(virtualStart, virtualEnd);
+  const topSpacer = virtualize ? virtualStart * 48 : 0;
+  const bottomSpacer = virtualize ? (pagedRows.length - virtualEnd) * 48 : 0;
 
-  useEffect(() => {
-    const savedPageSize = window.localStorage.getItem("csv-viewer-page-size");
-    if (savedPageSize !== null) setPageSize(Number(savedPageSize));
-  }, []);
+  const comparison = useMemo(() => {
+    if (comparisonRows.length < 1) return null;
+    const otherHeaders = comparisonRows[0] ?? [];
+    const otherData = comparisonRows.slice(1);
+    const left = new Map(data.map((row) => [row[primaryKey] ?? "", row]));
+    const right = new Map(otherData.map((row) => [row[comparisonKey] ?? "", row]));
+    let changed = 0;
+    let unchanged = 0;
+    left.forEach((row, key) => {
+      const other = right.get(key);
+      if (!other) return;
+      if (JSON.stringify(row) === JSON.stringify(other)) unchanged += 1;
+      else changed += 1;
+    });
+    return {
+      otherHeaders,
+      otherData,
+      added: [...right.keys()].filter((key) => !left.has(key)).length,
+      removed: [...left.keys()].filter((key) => !right.has(key)).length,
+      changed,
+      unchanged,
+    };
+  }, [comparisonKey, comparisonRows, data, primaryKey]);
+
+  const summaryRows = useMemo(() => {
+    const groups = new Map<string, number[]>();
+    filteredRows.forEach((row) => {
+      const key = row[groupColumn] || "(empty)";
+      const values = groups.get(key) ?? [];
+      const numeric = Number(row[aggregateColumn]);
+      if (!Number.isNaN(numeric)) values.push(numeric);
+      groups.set(key, values);
+    });
+    return [...groups.entries()]
+      .map(([label, values]) => {
+        if (aggregate === "count") return { label, value: filteredRows.filter((row) => (row[groupColumn] || "(empty)") === label).length };
+        if (values.length === 0) return { label, value: 0 };
+        if (aggregate === "sum") return { label, value: values.reduce((sum, value) => sum + value, 0) };
+        if (aggregate === "average") return { label, value: values.reduce((sum, value) => sum + value, 0) / values.length };
+        if (aggregate === "min") return { label, value: Math.min(...values) };
+        return { label, value: Math.max(...values) };
+      })
+      .sort((a, b) => b.value - a.value)
+      .slice(0, 100);
+  }, [aggregate, aggregateColumn, filteredRows, groupColumn]);
 
   useEffect(() => {
     window.localStorage.setItem("csv-viewer-page-size", String(pageSize));
@@ -554,6 +653,126 @@ export default function Home() {
     setUndoStack((current) => [...current, action]);
   }
 
+  function applyCleaning() {
+    const find = cleanFind;
+    let changed = 0;
+    setRows((current) =>
+      current.map((row, rowIndex) => {
+        if (rowIndex === 0) return row;
+        const before = row[cleanColumn] ?? "";
+        let after = before;
+        if (cleanAction === "trim") after = before.trim();
+        if (cleanAction === "upper") after = before.toLocaleUpperCase();
+        if (cleanAction === "lower") after = before.toLocaleLowerCase();
+        if (cleanAction === "title")
+          after = before.toLocaleLowerCase().replace(/\b\p{L}/gu, (letter) =>
+            letter.toLocaleUpperCase(),
+          );
+        if (cleanAction === "fill" && before.trim() === "") after = cleanReplacement;
+        if (cleanAction === "replace" && find !== "")
+          after = before.replaceAll(find, cleanReplacement);
+        if (after === before) return row;
+        changed += 1;
+        const next = [...row];
+        next[cleanColumn] = after;
+        return next;
+      }),
+    );
+    setUndoStack([]);
+    setRedoStack([]);
+    setToolMessage(
+      changed === 0
+        ? "No cells needed changing."
+        : `Updated ${changed.toLocaleString()} ${changed === 1 ? "cell" : "cells"}.`,
+    );
+  }
+
+  function removeDuplicates() {
+    const seen = new Set<string>();
+    let removed = 0;
+    setRows((current) => [
+      current[0],
+      ...current.slice(1).filter((row) => {
+        const key = JSON.stringify(row);
+        if (seen.has(key)) {
+          removed += 1;
+          return false;
+        }
+        seen.add(key);
+        return true;
+      }),
+    ]);
+    setUndoStack([]);
+    setRedoStack([]);
+    setToolMessage(`Removed ${removed.toLocaleString()} duplicate ${removed === 1 ? "row" : "rows"}.`);
+  }
+
+  async function loadComparisonFile(file?: File) {
+    if (!file) return;
+    if (!file.name.toLocaleLowerCase().endsWith(".csv")) {
+      setToolMessage("Choose a CSV file to compare.");
+      return;
+    }
+    setIsProcessing(true);
+    try {
+      const result = await parseInWorker((await file.text()).replace(/^\uFEFF/, ""));
+      setComparisonRows(result.rows);
+      setComparisonName(file.name);
+      setComparisonKey(0);
+      setToolMessage(`Ready to compare with ${file.name}.`);
+    } catch {
+      setToolMessage("The comparison file could not be parsed.");
+    } finally {
+      setIsProcessing(false);
+    }
+  }
+
+  function joinComparison() {
+    if (!comparison) return;
+    const rightByKey = new Map(
+      comparison.otherData.map((row) => [row[comparisonKey] ?? "", row]),
+    );
+    const appendedIndexes = comparison.otherHeaders
+      .map((header, index) => ({ header, index }))
+      .filter(({ index }) => index !== comparisonKey);
+    const joinedHeaders = [
+      ...headers,
+      ...appendedIndexes.map(({ header }) =>
+        headers.includes(header) ? `${header} (joined)` : header,
+      ),
+    ];
+    const joinedData = data.map((row) => {
+      const match = rightByKey.get(row[primaryKey] ?? "");
+      return [
+        ...row,
+        ...appendedIndexes.map(({ index }) => match?.[index] ?? ""),
+      ];
+    });
+    applyRows(
+      [joinedHeaders, ...joinedData],
+      `${fileName.replace(/\.csv$/i, "")}-joined.csv`,
+      delimiterLabel,
+    );
+    setShowTools(true);
+    setToolTab("compare");
+    setToolMessage(`Joined ${joinedData.length.toLocaleString()} rows using matching keys.`);
+  }
+
+  function exportSummary() {
+    const valueHeader =
+      aggregate === "count"
+        ? "Count"
+        : `${aggregate[0].toLocaleUpperCase()}${aggregate.slice(1)} of ${headers[aggregateColumn]}`;
+    downloadBlob(
+      [
+        [headers[groupColumn] || "Group", valueHeader].map(escapeCSV).join(","),
+        ...summaryRows.map((row) => [row.label, String(row.value)].map(escapeCSV).join(",")),
+      ].join("\r\n"),
+      `${fileName.replace(/\.csv$/i, "")}-summary.csv`,
+      "text/csv",
+    );
+  }
+
   function reset() {
     setRows([]);
     setFileName("");
@@ -563,6 +782,10 @@ export default function Home() {
     setColumnFilters({});
     setShowInsights(false);
     setShowChart(false);
+    setShowTools(false);
+    setComparisonRows([]);
+    setComparisonName("");
+    setToolMessage("");
     setEditingCell(null);
     setUndoStack([]);
     setRedoStack([]);
@@ -850,6 +1073,14 @@ export default function Home() {
                 <span aria-hidden="true">▥</span>
                 Chart
               </button>
+              <button
+                className={`insights-button ${showTools ? "is-active" : ""}`}
+                onClick={() => setShowTools((value) => !value)}
+                aria-pressed={showTools}
+              >
+                <span aria-hidden="true">✦</span>
+                Data tools
+              </button>
               <details className="columns-menu">
                 <summary>
                   <span aria-hidden="true">▥</span>
@@ -879,6 +1110,162 @@ export default function Home() {
               </details>
             </div>
           </div>
+
+          {showTools && (
+            <section className="tools-panel" aria-labelledby="tools-heading">
+              <div className="tools-heading">
+                <div>
+                  <p className="eyebrow">TRANSFORM &amp; ANALYSE</p>
+                  <h2 id="tools-heading">Data tools</h2>
+                </div>
+                <div className="tool-tabs" role="tablist" aria-label="Data tools">
+                  {(["clean", "compare", "summary"] as ToolTab[]).map((tab) => (
+                    <button
+                      key={tab}
+                      role="tab"
+                      aria-selected={toolTab === tab}
+                      className={toolTab === tab ? "is-active" : ""}
+                      onClick={() => {
+                        setToolTab(tab);
+                        setToolMessage("");
+                      }}
+                    >
+                      {tab === "clean" ? "Clean" : tab === "compare" ? "Compare & join" : "Summarize"}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {toolTab === "clean" && (
+                <div className="tool-workspace">
+                  <label>
+                    Column
+                    <select value={cleanColumn} onChange={(event) => setCleanColumn(Number(event.target.value))}>
+                      {headers.map((header, index) => (
+                        <option key={`clean-${index}`} value={index}>{header || `Column ${index + 1}`}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label>
+                    Action
+                    <select value={cleanAction} onChange={(event) => setCleanAction(event.target.value as CleanAction)}>
+                      <option value="trim">Trim whitespace</option>
+                      <option value="upper">UPPERCASE</option>
+                      <option value="lower">lowercase</option>
+                      <option value="title">Title Case</option>
+                      <option value="fill">Fill empty cells</option>
+                      <option value="replace">Find and replace</option>
+                    </select>
+                  </label>
+                  {cleanAction === "replace" && (
+                    <label>
+                      Find
+                      <input value={cleanFind} onChange={(event) => setCleanFind(event.target.value)} placeholder="Text to find" />
+                    </label>
+                  )}
+                  {(cleanAction === "replace" || cleanAction === "fill") && (
+                    <label>
+                      {cleanAction === "fill" ? "Fill with" : "Replace with"}
+                      <input value={cleanReplacement} onChange={(event) => setCleanReplacement(event.target.value)} placeholder="New value" />
+                    </label>
+                  )}
+                  <button className="primary compact" onClick={applyCleaning}>Apply to column</button>
+                  <button className="secondary compact" onClick={removeDuplicates}>Remove duplicate rows</button>
+                </div>
+              )}
+
+              {toolTab === "compare" && (
+                <div className="compare-workspace">
+                  <input
+                    ref={compareInputRef}
+                    className="sr-only"
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={(event) => {
+                      void loadComparisonFile(event.target.files?.[0]);
+                      event.target.value = "";
+                    }}
+                  />
+                  <div className="compare-file">
+                    <div>
+                      <strong>{comparisonName || "Choose a second CSV"}</strong>
+                      <span>Compare changes or join columns by a shared key.</span>
+                    </div>
+                    <button className="secondary compact" onClick={() => compareInputRef.current?.click()}>
+                      {comparisonName ? "Replace file" : "Choose file"}
+                    </button>
+                  </div>
+                  {comparison && (
+                    <>
+                      <div className="compare-keys">
+                        <label>
+                          Key in {fileName}
+                          <select value={primaryKey} onChange={(event) => setPrimaryKey(Number(event.target.value))}>
+                            {headers.map((header, index) => <option key={`primary-${index}`} value={index}>{header || `Column ${index + 1}`}</option>)}
+                          </select>
+                        </label>
+                        <span aria-hidden="true">↔</span>
+                        <label>
+                          Key in {comparisonName}
+                          <select value={comparisonKey} onChange={(event) => setComparisonKey(Number(event.target.value))}>
+                            {comparison.otherHeaders.map((header, index) => <option key={`other-${index}`} value={index}>{header || `Column ${index + 1}`}</option>)}
+                          </select>
+                        </label>
+                        <button className="primary compact" onClick={joinComparison}>Left join files</button>
+                      </div>
+                      <div className="compare-results">
+                        <article><strong>{comparison.added.toLocaleString()}</strong><span>Added keys</span></article>
+                        <article><strong>{comparison.removed.toLocaleString()}</strong><span>Removed keys</span></article>
+                        <article><strong>{comparison.changed.toLocaleString()}</strong><span>Changed rows</span></article>
+                        <article><strong>{comparison.unchanged.toLocaleString()}</strong><span>Unchanged rows</span></article>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+
+              {toolTab === "summary" && (
+                <div className="summary-workspace">
+                  <div className="summary-controls">
+                    <label>
+                      Group by
+                      <select value={groupColumn} onChange={(event) => setGroupColumn(Number(event.target.value))}>
+                        {headers.map((header, index) => <option key={`group-${index}`} value={index}>{header || `Column ${index + 1}`}</option>)}
+                      </select>
+                    </label>
+                    <label>
+                      Calculation
+                      <select value={aggregate} onChange={(event) => setAggregate(event.target.value as Aggregate)}>
+                        <option value="count">Count rows</option>
+                        <option value="sum">Sum</option>
+                        <option value="average">Average</option>
+                        <option value="min">Minimum</option>
+                        <option value="max">Maximum</option>
+                      </select>
+                    </label>
+                    {aggregate !== "count" && (
+                      <label>
+                        Value column
+                        <select value={aggregateColumn} onChange={(event) => setAggregateColumn(Number(event.target.value))}>
+                          {numericColumns.map((stat) => <option key={`aggregate-${stat.index}`} value={stat.index}>{stat.name}</option>)}
+                        </select>
+                      </label>
+                    )}
+                    <button className="secondary compact" onClick={exportSummary}>Export summary</button>
+                  </div>
+                  <div className="summary-table">
+                    <table>
+                      <thead><tr><th>{headers[groupColumn] || "Group"}</th><th>{aggregate === "count" ? "Count" : aggregate}</th></tr></thead>
+                      <tbody>
+                        {summaryRows.map((row) => <tr key={row.label}><td>{row.label}</td><td>{row.value.toLocaleString(undefined, { maximumFractionDigits: 2 })}</td></tr>)}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+              {toolMessage && <p className="tool-message" role="status">{toolMessage}</p>}
+            </section>
+          )}
 
           {showInsights && (
             <section className="insights-panel" aria-labelledby="profile-heading">
@@ -1032,7 +1419,12 @@ export default function Home() {
             </section>
           )}
 
-          <div className="table-shell">
+          <div
+            className={`table-shell ${virtualize ? "is-virtualized" : ""}`}
+            onScroll={(event) => {
+              if (virtualize) setScrollTop(event.currentTarget.scrollTop);
+            }}
+          >
             <table>
               <thead>
                 <tr>
@@ -1067,29 +1459,85 @@ export default function Home() {
                         <span className="sr-only">
                           Filter {header || `Column ${index + 1}`}
                         </span>
+                        <select
+                          aria-label={`Filter operator for ${header || `Column ${index + 1}`}`}
+                          value={columnFilters[index]?.operator ?? "contains"}
+                          onChange={(event) => {
+                            const current = columnFilters[index];
+                            setColumnFilters((filters) => ({
+                              ...filters,
+                              [index]: {
+                                operator: event.target.value as FilterOperator,
+                                value: current?.value ?? "",
+                                valueTo: current?.valueTo ?? "",
+                              },
+                            }));
+                            setPage(1);
+                          }}
+                        >
+                          <option value="contains">Contains</option>
+                          <option value="equals">Equals</option>
+                          <option value="starts">Starts with</option>
+                          <option value="empty">Is empty</option>
+                          <option value="not-empty">Is not empty</option>
+                          {columnStats[index]?.type === "Number" && (
+                            <>
+                              <option value="greater">Greater than</option>
+                              <option value="less">Less than</option>
+                              <option value="between">Between</option>
+                            </>
+                          )}
+                        </select>
                         <input
-                          value={columnFilters[index] ?? ""}
+                          value={columnFilters[index]?.value ?? ""}
+                          disabled={["empty", "not-empty"].includes(columnFilters[index]?.operator ?? "")}
                           onChange={(event) => {
                             const value = event.target.value;
                             setColumnFilters((current) => ({
                               ...current,
-                              [index]: value,
+                              [index]: {
+                                operator: current[index]?.operator ?? "contains",
+                                value,
+                                valueTo: current[index]?.valueTo ?? "",
+                              },
                             }));
                             setPage(1);
                           }}
                           placeholder="Filter…"
                         />
+                        {columnFilters[index]?.operator === "between" && (
+                          <input
+                            aria-label={`Maximum value for ${header || `Column ${index + 1}`}`}
+                            value={columnFilters[index]?.valueTo ?? ""}
+                            onChange={(event) =>
+                              setColumnFilters((current) => ({
+                                ...current,
+                                [index]: {
+                                  operator: "between",
+                                  value: current[index]?.value ?? "",
+                                  valueTo: event.target.value,
+                                },
+                              }))
+                            }
+                            placeholder="and…"
+                          />
+                        )}
                       </label>
                     </th>
                   ))}
                 </tr>
               </thead>
               <tbody>
+                {topSpacer > 0 && (
+                  <tr className="virtual-spacer" aria-hidden="true">
+                    <td style={{ height: topSpacer }} colSpan={visibleColumns.length + 1} />
+                  </tr>
+                )}
                 {visibleRows.map((row, rowIndex) => (
-                  <tr key={`${currentPage}-${rowIndex}-${row.join("|")}`}>
+                  <tr key={`${currentPage}-${virtualStart + rowIndex}-${row.join("|")}`}>
                     <td className="row-number">
                       {pageSize === 0
-                        ? rowIndex + 1
+                        ? virtualStart + rowIndex + 1
                         : (currentPage - 1) * pageSize + rowIndex + 1}
                     </td>
                     {visibleColumns.map(({ index }) => {
@@ -1134,6 +1582,11 @@ export default function Home() {
                     })}
                   </tr>
                 ))}
+                {bottomSpacer > 0 && (
+                  <tr className="virtual-spacer" aria-hidden="true">
+                    <td style={{ height: bottomSpacer }} colSpan={visibleColumns.length + 1} />
+                  </tr>
+                )}
                 {visibleRows.length === 0 && (
                   <tr>
                     <td
