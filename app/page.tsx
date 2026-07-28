@@ -80,10 +80,14 @@ export default function Home() {
   const [dragging, setDragging] = useState(false);
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(false);
+  const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
   const inputRef = useRef<HTMLInputElement>(null);
 
   const headers = rows[0] ?? [];
   const data = rows.slice(1);
+  const visibleColumns = headers
+    .map((header, index) => ({ header, index }))
+    .filter(({ index }) => !hiddenColumns.has(index));
 
   const filteredRows = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
@@ -142,6 +146,7 @@ export default function Home() {
     setFileName(name);
     setQuery("");
     setSort(null);
+    setHiddenColumns(new Set());
     setPage(1);
     setError("");
   }
@@ -181,6 +186,15 @@ export default function Home() {
     setPage(1);
   }
 
+  function toggleColumn(column: number) {
+    setHiddenColumns((current) => {
+      const next = new Set(current);
+      if (next.has(column)) next.delete(column);
+      else next.add(column);
+      return next;
+    });
+  }
+
   function download() {
     const content = [headers, ...filteredRows]
       .map((row) => row.map(escapeCSV).join(","))
@@ -198,6 +212,7 @@ export default function Home() {
     setFileName("");
     setQuery("");
     setSort(null);
+    setHiddenColumns(new Set());
     setPage(1);
     setError("");
   }
@@ -339,10 +354,39 @@ export default function Home() {
                 placeholder="Search every column…"
               />
             </label>
-            <p>
-              Showing <strong>{filteredRows.length.toLocaleString()}</strong> of{" "}
-              {data.length.toLocaleString()} rows
-            </p>
+            <div className="toolbar-options">
+              <p>
+                Showing <strong>{filteredRows.length.toLocaleString()}</strong>{" "}
+                of {data.length.toLocaleString()} rows
+              </p>
+              <details className="columns-menu">
+                <summary>
+                  <span aria-hidden="true">▥</span>
+                  Columns
+                  {hiddenColumns.size > 0 && <b>{hiddenColumns.size}</b>}
+                </summary>
+                <div className="columns-popover">
+                  <div className="columns-popover-heading">
+                    <strong>Visible columns</strong>
+                    {hiddenColumns.size > 0 && (
+                      <button onClick={() => setHiddenColumns(new Set())}>
+                        Show all
+                      </button>
+                    )}
+                  </div>
+                  {headers.map((header, index) => (
+                    <label key={`${header}-${index}`}>
+                      <input
+                        type="checkbox"
+                        checked={!hiddenColumns.has(index)}
+                        onChange={() => toggleColumn(index)}
+                      />
+                      <span>{header || `Column ${index + 1}`}</span>
+                    </label>
+                  ))}
+                </div>
+              </details>
+            </div>
           </div>
 
           <div className="table-shell">
@@ -350,7 +394,7 @@ export default function Home() {
               <thead>
                 <tr>
                   <th className="row-number">#</th>
-                  {headers.map((header, index) => (
+                  {visibleColumns.map(({ header, index }) => (
                     <th key={`${header}-${index}`}>
                       <button onClick={() => changeSort(index)}>
                         {header || `Column ${index + 1}`}
@@ -377,16 +421,19 @@ export default function Home() {
                     <td className="row-number">
                       {(currentPage - 1) * pageSize + rowIndex + 1}
                     </td>
-                    {headers.map((_, cellIndex) => (
-                      <td key={cellIndex} title={row[cellIndex] ?? ""}>
-                        {row[cellIndex] || <span className="empty">—</span>}
+                    {visibleColumns.map(({ index }) => (
+                      <td key={index} title={row[index] ?? ""}>
+                        {row[index] || <span className="empty">—</span>}
                       </td>
                     ))}
                   </tr>
                 ))}
                 {visibleRows.length === 0 && (
                   <tr>
-                    <td className="no-results" colSpan={headers.length + 1}>
+                    <td
+                      className="no-results"
+                      colSpan={visibleColumns.length + 1}
+                    >
                       No rows match “{query}”
                     </td>
                   </tr>
