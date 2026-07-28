@@ -11,6 +11,14 @@ import {
 
 type Cell = string;
 type SortState = { column: number; direction: "asc" | "desc" } | null;
+type EditAction = {
+  row: number;
+  column: number;
+  before: string;
+  after: string;
+};
+type EditingCell = { row: number; column: number; value: string } | null;
+type ExportFormat = "csv" | "json" | "markdown" | "html" | "sql";
 type ColumnStat = {
   index: number;
   name: string;
@@ -110,6 +118,34 @@ function escapeCSV(value: string) {
   return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
 }
 
+function downloadBlob(content: string, fileName: string, type: string) {
+  const url = URL.createObjectURL(new Blob([content], { type }));
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = fileName;
+  anchor.click();
+  URL.revokeObjectURL(url);
+}
+
+function parseInWorker(text: string) {
+  return new Promise<{ rows: Cell[][]; delimiterLabel: string }>(
+    (resolve, reject) => {
+      const worker = new Worker(new URL("./csv.worker.ts", import.meta.url), {
+        type: "module",
+      });
+      worker.onmessage = (event) => {
+        resolve(event.data);
+        worker.terminate();
+      };
+      worker.onerror = (event) => {
+        reject(new Error(event.message));
+        worker.terminate();
+      };
+      worker.postMessage({ text });
+    },
+  );
+}
+
 function DataIcon() {
   return (
     <span className="data-icon" aria-hidden="true">
@@ -134,6 +170,15 @@ export default function Home() {
   const [columnFilters, setColumnFilters] = useState<Record<number, string>>({});
   const [delimiterLabel, setDelimiterLabel] = useState("Comma");
   const [showInsights, setShowInsights] = useState(false);
+  const [showChart, setShowChart] = useState(false);
+  const [chartLabelColumn, setChartLabelColumn] = useState(0);
+  const [chartValueColumn, setChartValueColumn] = useState(0);
+  const [chartType, setChartType] = useState<"bar" | "line">("bar");
+  const [exportFormat, setExportFormat] = useState<ExportFormat>("csv");
+  const [editingCell, setEditingCell] = useState<EditingCell>(null);
+  const [undoStack, setUndoStack] = useState<EditAction[]>([]);
+  const [redoStack, setRedoStack] = useState<EditAction[]>([]);
+  const [isProcessing, setIsProcessing] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const headers = rows[0] ?? [];
@@ -249,6 +294,29 @@ export default function Home() {
     return duplicates;
   }, [data]);
 
+  const validation = useMemo(() => {
+    const duplicateHeaders =
+      headers.length - new Set(headers.map((header) => header.trim())).size;
+    const unevenRows = data.filter((row) => row.length !== headers.length).length;
+    const missingCells = columnStats.reduce(
+      (total, stat) => total + stat.missing,
+      0,
+    );
+    return { duplicateHeaders, unevenRows, missingCells };
+  }, [columnStats, data, headers]);
+
+  const numericColumns = columnStats.filter((stat) => stat.type === "Number");
+  const chartRows = useMemo(() => {
+    return filteredRows
+      .map((row) => ({
+        label: row[chartLabelColumn] || "—",
+        value: Number(row[chartValueColumn]),
+      }))
+      .filter((item) => !Number.isNaN(item.value))
+      .slice(0, 30);
+  }, [chartLabelColumn, chartValueColumn, filteredRows]);
+  const chartMaximum = Math.max(1, ...chartRows.map((item) => Math.abs(item.value)));
+
   const activeFilterCount = Object.values(columnFilters).filter(
     (value) => value.trim() !== "",
   ).length;
@@ -267,6 +335,15 @@ export default function Home() {
         );
 
   useEffect(() => {
+    const savedPageSize = window.localStorage.getItem("csv-viewer-page-size");
+    if (savedPageSize !== null) setPageSize(Number(savedPageSize));
+  }, []);
+
+  useEffect(() => {
+    window.localStorage.setItem("csv-viewer-page-size", String(pageSize));
+  }, [pageSize]);
+
+  useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
       if (event.key === "Escape") setExpanded(false);
     }
@@ -278,10 +355,7 @@ export default function Home() {
     };
   }, [expanded]);
 
-  function loadText(text: string, name: string) {
-    const cleanText = text.replace(/^\uFEFF/, "");
-    const detected = detectDelimiter(cleanText);
-    const parsed = parseCSV(cleanText, detected.value);
+  function applyRows(parsed: Cell[][], name: string, detectedLabel: string) {
     if (parsed.length === 0 || parsed[0].length === 0) {
       setError("We couldn’t find any rows in that file.");
       return;
@@ -292,34 +366,83 @@ export default function Home() {
     setSort(null);
     setHiddenColumns(new Set());
     setColumnFilters({});
-    setDelimiterLabel(detected.label);
+    setDelimiterLabel(detectedLabel);
     setShowInsights(false);
+    setShowChart(false);
+    setEditingCell(null);
+    setUndoStack([]);
+    setRedoStack([]);
+    setChartLabelColumn(0);
+    const firstNumeric = parsed[0].findIndex((_, index) =>
+      parsed.slice(1, 100).some((row) => {
+        const value = row[index];
+        return value !== "" && !Number.isNaN(Number(value));
+      }),
+    );
+    setChartValueColumn(Math.max(0, firstNumeric));
     setPage(1);
     setError("");
   }
 
-  async function loadFile(file?: File) {
-    if (!file) return;
-    if (!file.name.toLocaleLowerCase().endsWith(".csv")) {
-      setError("Please choose a .csv file.");
+  function loadText(text: string, name: string) {
+    const cleanText = text.replace(/^\uFEFF/, "");
+    const detected = detectDelimiter(cleanText);
+    const parsed = parseCSV(cleanText, detected.value);
+    applyRows(parsed, name, detected.label);
+  }
+
+  async function loadFiles(files: File[]) {
+    if (files.length === 0) return;
+    if (files.some((file) => !file.name.toLocaleLowerCase().endsWith(".csv"))) {
+      setError("Please choose only .csv files.");
       return;
     }
-    if (file.size > 20 * 1024 * 1024) {
-      setError("Please choose a CSV file smaller than 20 MB.");
+    if (files.some((file) => file.size > 20 * 1024 * 1024)) {
+      setError("Each CSV file must be smaller than 20 MB.");
       return;
     }
-    loadText(await file.text(), file.name);
+    setIsProcessing(true);
+    setError("");
+    try {
+      const parsedFiles = await Promise.all(
+        files.map(async (file) => parseInWorker(await file.text())),
+      );
+      const firstHeaders = parsedFiles[0].rows[0] ?? [];
+      const compatible = parsedFiles.every(
+        ({ rows: fileRows }) =>
+          JSON.stringify(fileRows[0] ?? []) === JSON.stringify(firstHeaders),
+      );
+      if (!compatible) {
+        setError("These files can’t be merged because their headers differ.");
+        return;
+      }
+      const merged = [
+        firstHeaders,
+        ...parsedFiles.flatMap(({ rows: fileRows }) => fileRows.slice(1)),
+      ];
+      applyRows(
+        merged,
+        files.length === 1
+          ? files[0].name
+          : `${files.length}-files-merged.csv`,
+        parsedFiles[0].delimiterLabel,
+      );
+    } catch {
+      setError("The file could not be parsed. Please check its CSV formatting.");
+    } finally {
+      setIsProcessing(false);
+    }
   }
 
   function onFileChange(event: ChangeEvent<HTMLInputElement>) {
-    void loadFile(event.target.files?.[0]);
+    void loadFiles(Array.from(event.target.files ?? []));
     event.target.value = "";
   }
 
   function onDrop(event: DragEvent<HTMLDivElement>) {
     event.preventDefault();
     setDragging(false);
-    void loadFile(event.dataTransfer.files?.[0]);
+    void loadFiles(Array.from(event.dataTransfer.files ?? []));
   }
 
   function changeSort(column: number) {
@@ -342,16 +465,93 @@ export default function Home() {
     });
   }
 
-  function download() {
-    const content = [headers, ...filteredRows]
-      .map((row) => row.map(escapeCSV).join(","))
-      .join("\r\n");
-    const url = URL.createObjectURL(new Blob([content], { type: "text/csv" }));
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = fileName.replace(/\.csv$/i, "") + "-filtered.csv";
-    anchor.click();
-    URL.revokeObjectURL(url);
+  function download(format: ExportFormat = exportFormat) {
+    const baseName = fileName.replace(/\.csv$/i, "") + "-filtered";
+    const table = [headers, ...filteredRows];
+    if (format === "json") {
+      const objects = filteredRows.map((row) =>
+        Object.fromEntries(headers.map((header, index) => [header, row[index] ?? ""])),
+      );
+      downloadBlob(JSON.stringify(objects, null, 2), `${baseName}.json`, "application/json");
+    } else if (format === "markdown") {
+      const escape = (value: string) => value.replaceAll("|", "\\|").replaceAll("\n", " ");
+      const content = [
+        `| ${headers.map(escape).join(" | ")} |`,
+        `| ${headers.map(() => "---").join(" | ")} |`,
+        ...filteredRows.map((row) => `| ${headers.map((_, index) => escape(row[index] ?? "")).join(" | ")} |`),
+      ].join("\n");
+      downloadBlob(content, `${baseName}.md`, "text/markdown");
+    } else if (format === "html") {
+      const escape = (value: string) =>
+        value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+      const content = `<!doctype html><meta charset="utf-8"><table><thead><tr>${headers.map((value) => `<th>${escape(value)}</th>`).join("")}</tr></thead><tbody>${filteredRows.map((row) => `<tr>${headers.map((_, index) => `<td>${escape(row[index] ?? "")}</td>`).join("")}</tr>`).join("")}</tbody></table>`;
+      downloadBlob(content, `${baseName}.html`, "text/html");
+    } else if (format === "sql") {
+      const columns = headers.map((header) => `"${header.replaceAll('"', '""')}"`).join(", ");
+      const content = filteredRows
+        .map((row) => `INSERT INTO "csv_data" (${columns}) VALUES (${headers.map((_, index) => `'${(row[index] ?? "").replaceAll("'", "''")}'`).join(", ")});`)
+        .join("\n");
+      downloadBlob(content, `${baseName}.sql`, "text/sql");
+    } else {
+      downloadBlob(
+        table.map((row) => row.map(escapeCSV).join(",")).join("\r\n"),
+        `${baseName}.csv`,
+        "text/csv",
+      );
+    }
+  }
+
+  function commitEdit() {
+    if (!editingCell) return;
+    const before = rows[editingCell.row]?.[editingCell.column] ?? "";
+    if (before !== editingCell.value) {
+      setRows((current) =>
+        current.map((row, index) => {
+          if (index !== editingCell.row) return row;
+          const next = [...row];
+          next[editingCell.column] = editingCell.value;
+          return next;
+        }),
+      );
+      setUndoStack((current) => [
+        ...current,
+        {
+          row: editingCell.row,
+          column: editingCell.column,
+          before,
+          after: editingCell.value,
+        },
+      ]);
+      setRedoStack([]);
+    }
+    setEditingCell(null);
+  }
+
+  function applyEdit(action: EditAction, value: string) {
+    setRows((current) =>
+      current.map((row, index) => {
+        if (index !== action.row) return row;
+        const next = [...row];
+        next[action.column] = value;
+        return next;
+      }),
+    );
+  }
+
+  function undo() {
+    const action = undoStack.at(-1);
+    if (!action) return;
+    applyEdit(action, action.before);
+    setUndoStack((current) => current.slice(0, -1));
+    setRedoStack((current) => [...current, action]);
+  }
+
+  function redo() {
+    const action = redoStack.at(-1);
+    if (!action) return;
+    applyEdit(action, action.after);
+    setRedoStack((current) => current.slice(0, -1));
+    setUndoStack((current) => [...current, action]);
   }
 
   function reset() {
@@ -362,6 +562,10 @@ export default function Home() {
     setHiddenColumns(new Set());
     setColumnFilters({});
     setShowInsights(false);
+    setShowChart(false);
+    setEditingCell(null);
+    setUndoStack([]);
+    setRedoStack([]);
     setPage(1);
     setError("");
   }
@@ -410,18 +614,19 @@ export default function Home() {
               ref={inputRef}
               type="file"
               accept=".csv,text/csv"
+              multiple
               onChange={onFileChange}
-              aria-label="Choose a CSV file"
+              aria-label="Choose one or more CSV files"
             />
             <div className="upload-mark" aria-hidden="true">
               ↑
             </div>
             <h2>Drop your CSV here</h2>
-            <p>or choose a file from your computer</p>
+            <p>or choose one or more compatible files to merge</p>
             <button className="primary" onClick={() => inputRef.current?.click()}>
-              Choose CSV file
+              {isProcessing ? "Processing…" : "Choose CSV files"}
             </button>
-            <small>Up to 20 MB · Processed locally</small>
+            <small>Up to 20 MB each · Parsed in the background · Processed locally</small>
           </div>
 
           {error && (
@@ -555,6 +760,22 @@ export default function Home() {
             </div>
             <div className="viewer-actions">
               <button
+                className="secondary history-button"
+                onClick={undo}
+                disabled={undoStack.length === 0}
+                title="Undo last cell edit"
+              >
+                ↶ Undo
+              </button>
+              <button
+                className="secondary history-button"
+                onClick={redo}
+                disabled={redoStack.length === 0}
+                title="Redo last cell edit"
+              >
+                ↷ Redo
+              </button>
+              <button
                 className="secondary expand-button"
                 onClick={() => setExpanded((value) => !value)}
                 aria-pressed={expanded}
@@ -566,9 +787,24 @@ export default function Home() {
               <button className="secondary" onClick={reset}>
                 Open another
               </button>
-              <button className="primary compact" onClick={download}>
-                Export filtered CSV
-              </button>
+              <div className="export-control">
+                <select
+                  aria-label="Export format"
+                  value={exportFormat}
+                  onChange={(event) =>
+                    setExportFormat(event.target.value as ExportFormat)
+                  }
+                >
+                  <option value="csv">CSV</option>
+                  <option value="json">JSON</option>
+                  <option value="markdown">Markdown</option>
+                  <option value="html">HTML</option>
+                  <option value="sql">SQL</option>
+                </select>
+                <button className="primary compact" onClick={() => download()}>
+                  Export
+                </button>
+              </div>
             </div>
           </div>
 
@@ -605,6 +841,14 @@ export default function Home() {
               >
                 <span aria-hidden="true">◫</span>
                 Data profile
+              </button>
+              <button
+                className={`insights-button ${showChart ? "is-active" : ""}`}
+                onClick={() => setShowChart((value) => !value)}
+                aria-pressed={showChart}
+              >
+                <span aria-hidden="true">▥</span>
+                Chart
               </button>
               <details className="columns-menu">
                 <summary>
@@ -654,6 +898,18 @@ export default function Home() {
                     <strong>{duplicateRows.toLocaleString()}</strong> duplicate{" "}
                     {duplicateRows === 1 ? "row" : "rows"}
                   </span>
+                  <span className={validation.unevenRows > 0 ? "has-warning" : ""}>
+                    <strong>{validation.unevenRows.toLocaleString()}</strong>{" "}
+                    uneven rows
+                  </span>
+                  <span className={validation.duplicateHeaders > 0 ? "has-warning" : ""}>
+                    <strong>{validation.duplicateHeaders.toLocaleString()}</strong>{" "}
+                    duplicate headers
+                  </span>
+                  <span className={validation.missingCells > 0 ? "has-warning" : ""}>
+                    <strong>{validation.missingCells.toLocaleString()}</strong>{" "}
+                    missing cells
+                  </span>
                 </div>
               </div>
               <div className="stat-grid">
@@ -698,6 +954,81 @@ export default function Home() {
                   </article>
                 ))}
               </div>
+            </section>
+          )}
+
+          {showChart && (
+            <section className="chart-panel" aria-labelledby="chart-heading">
+              <div className="chart-toolbar">
+                <div>
+                  <p className="eyebrow">QUICK VISUAL</p>
+                  <h2 id="chart-heading">Chart filtered data</h2>
+                </div>
+                <label>
+                  Labels
+                  <select
+                    value={chartLabelColumn}
+                    onChange={(event) => setChartLabelColumn(Number(event.target.value))}
+                  >
+                    {headers.map((header, index) => (
+                      <option key={`label-${index}`} value={index}>
+                        {header || `Column ${index + 1}`}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Values
+                  <select
+                    value={chartValueColumn}
+                    onChange={(event) => setChartValueColumn(Number(event.target.value))}
+                  >
+                    {numericColumns.map((stat) => (
+                      <option key={`value-${stat.index}`} value={stat.index}>
+                        {stat.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label>
+                  Style
+                  <select
+                    value={chartType}
+                    onChange={(event) =>
+                      setChartType(event.target.value as "bar" | "line")
+                    }
+                  >
+                    <option value="bar">Bars</option>
+                    <option value="line">Dot plot</option>
+                  </select>
+                </label>
+              </div>
+              {numericColumns.length === 0 ? (
+                <p className="chart-empty">
+                  Add a numeric column to create a chart.
+                </p>
+              ) : chartRows.length === 0 ? (
+                <p className="chart-empty">No numeric rows match the filters.</p>
+              ) : (
+                <div className={`quick-chart chart-${chartType}`}>
+                  {chartRows.map((item, index) => (
+                    <div className="chart-item" key={`${item.label}-${index}`}>
+                      <span className="chart-value">{item.value.toLocaleString()}</span>
+                      <i
+                        style={{
+                          height: `${Math.max(3, (Math.abs(item.value) / chartMaximum) * 100)}%`,
+                        }}
+                      />
+                      <span className="chart-label" title={item.label}>
+                        {item.label}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {chartRows.length > 30 && (
+                <small>Showing the first 30 matching rows.</small>
+              )}
             </section>
           )}
 
@@ -761,11 +1092,46 @@ export default function Home() {
                         ? rowIndex + 1
                         : (currentPage - 1) * pageSize + rowIndex + 1}
                     </td>
-                    {visibleColumns.map(({ index }) => (
-                      <td key={index} title={row[index] ?? ""}>
-                        {row[index] || <span className="empty">—</span>}
+                    {visibleColumns.map(({ index }) => {
+                      const sourceRow = rows.indexOf(row);
+                      const isEditing =
+                        editingCell?.row === sourceRow &&
+                        editingCell.column === index;
+                      return (
+                      <td
+                        key={index}
+                        title={isEditing ? undefined : row[index] ?? ""}
+                        onDoubleClick={() =>
+                          setEditingCell({
+                            row: sourceRow,
+                            column: index,
+                            value: row[index] ?? "",
+                          })
+                        }
+                      >
+                        {isEditing ? (
+                          <input
+                            className="cell-editor"
+                            autoFocus
+                            value={editingCell.value}
+                            onChange={(event) =>
+                              setEditingCell({
+                                ...editingCell,
+                                value: event.target.value,
+                              })
+                            }
+                            onBlur={commitEdit}
+                            onKeyDown={(event) => {
+                              if (event.key === "Enter") commitEdit();
+                              if (event.key === "Escape") setEditingCell(null);
+                            }}
+                          />
+                        ) : (
+                          row[index] || <span className="empty">—</span>
+                        )}
                       </td>
-                    ))}
+                      );
+                    })}
                   </tr>
                 ))}
                 {visibleRows.length === 0 && (
