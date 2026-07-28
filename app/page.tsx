@@ -1,0 +1,415 @@
+"use client";
+
+import { ChangeEvent, DragEvent, useMemo, useRef, useState } from "react";
+
+type Cell = string;
+type SortState = { column: number; direction: "asc" | "desc" } | null;
+
+const SAMPLE = `Name,Role,Location,Status,Last active
+Maya Chen,Product Designer,London,Active,2026-07-28
+Leo Martins,Frontend Engineer,Lisbon,Active,2026-07-27
+Amara Okafor,Data Analyst,Lagos,Away,2026-07-25
+Noah Williams,Support Lead,Manchester,Active,2026-07-28
+Sofia Rossi,Marketing Manager,Milan,Offline,2026-07-21
+Ethan Kim,Backend Engineer,Seoul,Active,2026-07-28
+Priya Shah,Researcher,Bristol,Away,2026-07-24
+Oliver Jensen,Operations,Copenhagen,Active,2026-07-26`;
+
+function parseCSV(text: string) {
+  const rows: Cell[][] = [];
+  let row: Cell[] = [];
+  let cell = "";
+  let quoted = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    if (char === '"') {
+      if (quoted && text[i + 1] === '"') {
+        cell += '"';
+        i += 1;
+      } else {
+        quoted = !quoted;
+      }
+    } else if (char === "," && !quoted) {
+      row.push(cell);
+      cell = "";
+    } else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && text[i + 1] === "\n") i += 1;
+      row.push(cell);
+      if (row.some((value) => value.length > 0)) rows.push(row);
+      row = [];
+      cell = "";
+    } else {
+      cell += char;
+    }
+  }
+
+  row.push(cell);
+  if (row.some((value) => value.length > 0)) rows.push(row);
+  return rows;
+}
+
+function escapeCSV(value: string) {
+  return /[",\n\r]/.test(value) ? `"${value.replaceAll('"', '""')}"` : value;
+}
+
+function DataIcon() {
+  return (
+    <span className="data-icon" aria-hidden="true">
+      <i />
+      <i />
+      <i />
+    </span>
+  );
+}
+
+export default function Home() {
+  const [rows, setRows] = useState<Cell[][]>([]);
+  const [fileName, setFileName] = useState("");
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortState>(null);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const [dragging, setDragging] = useState(false);
+  const [error, setError] = useState("");
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const headers = rows[0] ?? [];
+  const data = rows.slice(1);
+
+  const filteredRows = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    const filtered = normalized
+      ? data.filter((row) =>
+          row.some((value) => value.toLocaleLowerCase().includes(normalized)),
+        )
+      : data;
+
+    if (!sort) return filtered;
+    return [...filtered].sort((a, b) => {
+      const left = a[sort.column] ?? "";
+      const right = b[sort.column] ?? "";
+      const numericLeft = Number(left);
+      const numericRight = Number(right);
+      const comparison =
+        left !== "" &&
+        right !== "" &&
+        !Number.isNaN(numericLeft) &&
+        !Number.isNaN(numericRight)
+          ? numericLeft - numericRight
+          : left.localeCompare(right, undefined, {
+              numeric: true,
+              sensitivity: "base",
+            });
+      return sort.direction === "asc" ? comparison : -comparison;
+    });
+  }, [data, query, sort]);
+
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = filteredRows.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize,
+  );
+
+  function loadText(text: string, name: string) {
+    const parsed = parseCSV(text.replace(/^\uFEFF/, ""));
+    if (parsed.length === 0 || parsed[0].length === 0) {
+      setError("We couldn’t find any rows in that file.");
+      return;
+    }
+    setRows(parsed);
+    setFileName(name);
+    setQuery("");
+    setSort(null);
+    setPage(1);
+    setError("");
+  }
+
+  async function loadFile(file?: File) {
+    if (!file) return;
+    if (!file.name.toLocaleLowerCase().endsWith(".csv")) {
+      setError("Please choose a .csv file.");
+      return;
+    }
+    if (file.size > 20 * 1024 * 1024) {
+      setError("Please choose a CSV file smaller than 20 MB.");
+      return;
+    }
+    loadText(await file.text(), file.name);
+  }
+
+  function onFileChange(event: ChangeEvent<HTMLInputElement>) {
+    void loadFile(event.target.files?.[0]);
+    event.target.value = "";
+  }
+
+  function onDrop(event: DragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    setDragging(false);
+    void loadFile(event.dataTransfer.files?.[0]);
+  }
+
+  function changeSort(column: number) {
+    setSort((current) => {
+      if (!current || current.column !== column)
+        return { column, direction: "asc" };
+      if (current.direction === "asc")
+        return { column, direction: "desc" };
+      return null;
+    });
+    setPage(1);
+  }
+
+  function download() {
+    const content = [headers, ...filteredRows]
+      .map((row) => row.map(escapeCSV).join(","))
+      .join("\r\n");
+    const url = URL.createObjectURL(new Blob([content], { type: "text/csv" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = fileName.replace(/\.csv$/i, "") + "-filtered.csv";
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function reset() {
+    setRows([]);
+    setFileName("");
+    setQuery("");
+    setSort(null);
+    setPage(1);
+    setError("");
+  }
+
+  return (
+    <main>
+      <nav className="site-nav" aria-label="Primary navigation">
+        <a className="brand" href="#" aria-label="CSV Viewer home">
+          <DataIcon />
+          <span>CSV Viewer</span>
+        </a>
+        <a
+          className="github-link"
+          href="https://github.com/kiranshahi/csv-viewer"
+          target="_blank"
+          rel="noreferrer"
+        >
+          View on GitHub <span aria-hidden="true">↗</span>
+        </a>
+      </nav>
+
+      {rows.length === 0 ? (
+        <section className="hero">
+          <p className="eyebrow">FAST · PRIVATE · OPEN SOURCE</p>
+          <h1>
+            See what’s inside
+            <br />
+            <em>your CSV.</em>
+          </h1>
+          <p className="intro">
+            Drop in a file and explore your data instantly. Search, sort and
+            scan every row—nothing ever leaves your browser.
+          </p>
+
+          <div
+            className={`drop-zone ${dragging ? "is-dragging" : ""}`}
+            onDragEnter={(event) => {
+              event.preventDefault();
+              setDragging(true);
+            }}
+            onDragOver={(event) => event.preventDefault()}
+            onDragLeave={() => setDragging(false)}
+            onDrop={onDrop}
+          >
+            <input
+              ref={inputRef}
+              type="file"
+              accept=".csv,text/csv"
+              onChange={onFileChange}
+              aria-label="Choose a CSV file"
+            />
+            <div className="upload-mark" aria-hidden="true">
+              ↑
+            </div>
+            <h2>Drop your CSV here</h2>
+            <p>or choose a file from your computer</p>
+            <button className="primary" onClick={() => inputRef.current?.click()}>
+              Choose CSV file
+            </button>
+            <small>Up to 20 MB · Processed locally</small>
+          </div>
+
+          {error && (
+            <p className="error" role="alert">
+              {error}
+            </p>
+          )}
+
+          <button
+            className="sample-link"
+            onClick={() => loadText(SAMPLE, "team-directory.csv")}
+          >
+            No file handy? <span>Try the sample data →</span>
+          </button>
+
+          <div className="trust-row" aria-label="Key benefits">
+            <p>
+              <b>01</b>
+              <span>
+                <strong>Stays private</strong>
+                Your data never leaves this device.
+              </span>
+            </p>
+            <p>
+              <b>02</b>
+              <span>
+                <strong>Works instantly</strong>
+                No account, upload or waiting around.
+              </span>
+            </p>
+            <p>
+              <b>03</b>
+              <span>
+                <strong>Easy to explore</strong>
+                Search, sort and export in a click.
+              </span>
+            </p>
+          </div>
+        </section>
+      ) : (
+        <section className="viewer">
+          <div className="viewer-heading">
+            <div>
+              <p className="eyebrow">YOUR DATA</p>
+              <h1>{fileName}</h1>
+              <p>
+                {data.length.toLocaleString()} rows ·{" "}
+                {headers.length.toLocaleString()} columns
+              </p>
+            </div>
+            <div className="viewer-actions">
+              <button className="secondary" onClick={reset}>
+                Open another
+              </button>
+              <button className="primary compact" onClick={download}>
+                Export filtered CSV
+              </button>
+            </div>
+          </div>
+
+          <div className="table-toolbar">
+            <label className="search">
+              <span aria-hidden="true">⌕</span>
+              <input
+                value={query}
+                onChange={(event) => {
+                  setQuery(event.target.value);
+                  setPage(1);
+                }}
+                placeholder="Search every column…"
+              />
+            </label>
+            <p>
+              Showing <strong>{filteredRows.length.toLocaleString()}</strong> of{" "}
+              {data.length.toLocaleString()} rows
+            </p>
+          </div>
+
+          <div className="table-shell">
+            <table>
+              <thead>
+                <tr>
+                  <th className="row-number">#</th>
+                  {headers.map((header, index) => (
+                    <th key={`${header}-${index}`}>
+                      <button onClick={() => changeSort(index)}>
+                        {header || `Column ${index + 1}`}
+                        <span
+                          className={
+                            sort?.column === index ? "sort active" : "sort"
+                          }
+                          aria-hidden="true"
+                        >
+                          {sort?.column === index
+                            ? sort.direction === "asc"
+                              ? "↑"
+                              : "↓"
+                            : "↕"}
+                        </span>
+                      </button>
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {visibleRows.map((row, rowIndex) => (
+                  <tr key={`${currentPage}-${rowIndex}-${row.join("|")}`}>
+                    <td className="row-number">
+                      {(currentPage - 1) * pageSize + rowIndex + 1}
+                    </td>
+                    {headers.map((_, cellIndex) => (
+                      <td key={cellIndex} title={row[cellIndex] ?? ""}>
+                        {row[cellIndex] || <span className="empty">—</span>}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+                {visibleRows.length === 0 && (
+                  <tr>
+                    <td className="no-results" colSpan={headers.length + 1}>
+                      No rows match “{query}”
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+
+          <div className="pagination">
+            <label>
+              Rows per page
+              <select
+                value={pageSize}
+                onChange={(event) => {
+                  setPageSize(Number(event.target.value));
+                  setPage(1);
+                }}
+              >
+                <option value="10">10</option>
+                <option value="25">25</option>
+                <option value="50">50</option>
+                <option value="100">100</option>
+              </select>
+            </label>
+            <div>
+              <button
+                aria-label="Previous page"
+                onClick={() => setPage((value) => Math.max(1, value - 1))}
+                disabled={currentPage === 1}
+              >
+                ←
+              </button>
+              <span>
+                Page {currentPage} of {pageCount}
+              </span>
+              <button
+                aria-label="Next page"
+                onClick={() =>
+                  setPage((value) => Math.min(pageCount, value + 1))
+                }
+                disabled={currentPage === pageCount}
+              >
+                →
+              </button>
+            </div>
+          </div>
+        </section>
+      )}
+
+      <footer>
+        Built for curious minds. <span>CSV Viewer · 2026</span>
+      </footer>
+    </main>
+  );
+}
