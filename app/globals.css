@@ -525,7 +525,9 @@ body.viewer-expanded {
 
 .viewer.is-expanded .table-shell {
   flex: 1;
+  height: 0;
   min-height: 0;
+  max-height: none;
 }
 
 .viewer-heading {
