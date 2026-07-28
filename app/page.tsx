@@ -117,12 +117,18 @@ export default function Home() {
     });
   }, [data, query, sort]);
 
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const pageCount =
+    pageSize === 0
+      ? 1
+      : Math.max(1, Math.ceil(filteredRows.length / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const visibleRows = filteredRows.slice(
-    (currentPage - 1) * pageSize,
-    currentPage * pageSize,
-  );
+  const visibleRows =
+    pageSize === 0
+      ? filteredRows
+      : filteredRows.slice(
+          (currentPage - 1) * pageSize,
+          currentPage * pageSize,
+        );
 
   useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
@@ -419,7 +425,9 @@ export default function Home() {
                 {visibleRows.map((row, rowIndex) => (
                   <tr key={`${currentPage}-${rowIndex}-${row.join("|")}`}>
                     <td className="row-number">
-                      {(currentPage - 1) * pageSize + rowIndex + 1}
+                      {pageSize === 0
+                        ? rowIndex + 1
+                        : (currentPage - 1) * pageSize + rowIndex + 1}
                     </td>
                     {visibleColumns.map(({ index }) => (
                       <td key={index} title={row[index] ?? ""}>
@@ -456,6 +464,7 @@ export default function Home() {
                 <option value="25">25</option>
                 <option value="50">50</option>
                 <option value="100">100</option>
+                <option value="0">All</option>
               </select>
             </label>
             <div>
