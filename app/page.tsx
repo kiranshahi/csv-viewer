@@ -317,6 +317,86 @@ export default function Home() {
               </span>
             </p>
           </div>
+
+          <section className="seo-content" aria-labelledby="about-csv-viewer">
+            <div className="seo-intro">
+              <p className="eyebrow">EXPLORE DATA WITHOUT THE FUSS</p>
+              <h2 id="about-csv-viewer">A free online CSV viewer that stays private</h2>
+              <p>
+                CSV Viewer lets you open comma-separated value files directly
+                in your web browser. There is no software to install, no account
+                to create and no file upload to wait for. Your data is read and
+                processed locally on your device.
+              </p>
+            </div>
+
+            <div className="seo-grid">
+              <article>
+                <span>SEARCH &amp; SORT</span>
+                <h3>Find the rows you need</h3>
+                <p>
+                  Search across every column, sort values in either direction
+                  and move through large CSV tables with simple pagination.
+                </p>
+              </article>
+              <article>
+                <span>CUSTOMISE THE VIEW</span>
+                <h3>Focus on useful columns</h3>
+                <p>
+                  Hide columns, expand the table to fill your screen or show all
+                  matching rows at once without changing the original file.
+                </p>
+              </article>
+              <article>
+                <span>EXPORT RESULTS</span>
+                <h3>Download filtered data</h3>
+                <p>
+                  Export your current filtered result as a new CSV file while
+                  keeping every original column available.
+                </p>
+              </article>
+            </div>
+
+            <div className="how-it-works">
+              <h2>How to view a CSV file online</h2>
+              <ol>
+                <li>
+                  <b>1</b>
+                  <span><strong>Choose a CSV file</strong>Drop a file onto the viewer or select one from your device.</span>
+                </li>
+                <li>
+                  <b>2</b>
+                  <span><strong>Explore your table</strong>Search, sort, hide columns and adjust the number of visible rows.</span>
+                </li>
+                <li>
+                  <b>3</b>
+                  <span><strong>Export when ready</strong>Download the filtered result or simply close the page.</span>
+                </li>
+              </ol>
+            </div>
+
+            <div className="faq">
+              <h2>CSV Viewer questions</h2>
+              <details>
+                <summary>Is this CSV viewer free?</summary>
+                <p>Yes. The tool is free to use and does not require an account.</p>
+              </details>
+              <details>
+                <summary>Are CSV files uploaded to a server?</summary>
+                <p>
+                  No. Files are processed locally by your browser and never
+                  leave your device.
+                </p>
+              </details>
+              <details>
+                <summary>Can I open large CSV files?</summary>
+                <p>
+                  The viewer supports CSV files up to 20 MB and includes
+                  pagination to keep large tables manageable.
+                </p>
+              </details>
+            </div>
+          </section>
         </section>
       ) : (
         <section className={`viewer ${expanded ? "is-expanded" : ""}`}>
