@@ -11,6 +11,17 @@ import {
 
 type Cell = string;
 type SortState = { column: number; direction: "asc" | "desc" } | null;
+type ColumnStat = {
+  index: number;
+  name: string;
+  type: "Number" | "Date" | "Text" | "Empty";
+  populated: number;
+  missing: number;
+  unique: number;
+  minimum?: string;
+  maximum?: string;
+  average?: string;
+};
 
 const SAMPLE = `Name,Role,Location,Status,Last active
 Maya Chen,Product Designer,London,Active,2026-07-28
@@ -22,7 +33,46 @@ Ethan Kim,Backend Engineer,Seoul,Active,2026-07-28
 Priya Shah,Researcher,Bristol,Away,2026-07-24
 Oliver Jensen,Operations,Copenhagen,Active,2026-07-26`;
 
-function parseCSV(text: string) {
+const DELIMITERS = [
+  { value: ",", label: "Comma" },
+  { value: ";", label: "Semicolon" },
+  { value: "\t", label: "Tab" },
+  { value: "|", label: "Pipe" },
+];
+
+function detectDelimiter(text: string) {
+  const sample = text.slice(0, 100_000);
+  const scores = DELIMITERS.map(({ value, label }) => {
+    const counts: number[] = [];
+    let quoted = false;
+    let count = 0;
+
+    for (let i = 0; i < sample.length && counts.length < 12; i += 1) {
+      const char = sample[i];
+      if (char === '"') {
+        if (quoted && sample[i + 1] === '"') i += 1;
+        else quoted = !quoted;
+      } else if (char === value && !quoted) {
+        count += 1;
+      } else if ((char === "\n" || char === "\r") && !quoted) {
+        if (char === "\r" && sample[i + 1] === "\n") i += 1;
+        if (count > 0) counts.push(count);
+        count = 0;
+      }
+    }
+
+    if (count > 0) counts.push(count);
+    const frequency = new Map<number, number>();
+    counts.forEach((item) => frequency.set(item, (frequency.get(item) ?? 0) + 1));
+    const consistency = Math.max(0, ...frequency.values());
+    const columns = Math.max(0, ...counts);
+    return { value, label, score: consistency * 100 + columns };
+  });
+
+  return scores.sort((a, b) => b.score - a.score)[0] ?? DELIMITERS[0];
+}
+
+function parseCSV(text: string, delimiter = ",") {
   const rows: Cell[][] = [];
   let row: Cell[] = [];
   let cell = "";
@@ -37,7 +87,7 @@ function parseCSV(text: string) {
       } else {
         quoted = !quoted;
       }
-    } else if (char === "," && !quoted) {
+    } else if (char === delimiter && !quoted) {
       row.push(cell);
       cell = "";
     } else if ((char === "\n" || char === "\r") && !quoted) {
@@ -81,6 +131,9 @@ export default function Home() {
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
+  const [columnFilters, setColumnFilters] = useState<Record<number, string>>({});
+  const [delimiterLabel, setDelimiterLabel] = useState("Comma");
+  const [showInsights, setShowInsights] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   const headers = rows[0] ?? [];
@@ -91,11 +144,20 @@ export default function Home() {
 
   const filteredRows = useMemo(() => {
     const normalized = query.trim().toLocaleLowerCase();
-    const filtered = normalized
-      ? data.filter((row) =>
-          row.some((value) => value.toLocaleLowerCase().includes(normalized)),
-        )
-      : data;
+    const activeColumnFilters = Object.entries(columnFilters).filter(
+      ([, value]) => value.trim() !== "",
+    );
+    const filtered = data.filter((row) => {
+      const matchesSearch =
+        !normalized ||
+        row.some((value) => value.toLocaleLowerCase().includes(normalized));
+      const matchesColumns = activeColumnFilters.every(([column, value]) =>
+        (row[Number(column)] ?? "")
+          .toLocaleLowerCase()
+          .includes(value.trim().toLocaleLowerCase()),
+      );
+      return matchesSearch && matchesColumns;
+    });
 
     if (!sort) return filtered;
     return [...filtered].sort((a, b) => {
@@ -115,7 +177,81 @@ export default function Home() {
             });
       return sort.direction === "asc" ? comparison : -comparison;
     });
-  }, [data, query, sort]);
+  }, [columnFilters, data, query, sort]);
+
+  const columnStats = useMemo<ColumnStat[]>(() => {
+    return headers.map((header, index) => {
+      const values = data.map((row) => (row[index] ?? "").trim());
+      const populatedValues = values.filter((value) => value !== "");
+      const numericValues = populatedValues.map(Number);
+      const isNumeric =
+        populatedValues.length > 0 &&
+        numericValues.every((value) => !Number.isNaN(value));
+      const isDate =
+        populatedValues.length > 0 &&
+        populatedValues.every(
+          (value) =>
+            /^\d{4}-\d{2}-\d{2}/.test(value) &&
+            !Number.isNaN(Date.parse(value)),
+        );
+      const type =
+        populatedValues.length === 0
+          ? "Empty"
+          : isNumeric
+            ? "Number"
+            : isDate
+              ? "Date"
+              : "Text";
+      const stat: ColumnStat = {
+        index,
+        name: header || `Column ${index + 1}`,
+        type,
+        populated: populatedValues.length,
+        missing: values.length - populatedValues.length,
+        unique: new Set(populatedValues).size,
+      };
+
+      if (isNumeric) {
+        const minimum = numericValues.reduce(
+          (current, value) => Math.min(current, value),
+          Number.POSITIVE_INFINITY,
+        );
+        const maximum = numericValues.reduce(
+          (current, value) => Math.max(current, value),
+          Number.NEGATIVE_INFINITY,
+        );
+        stat.minimum = minimum.toLocaleString();
+        stat.maximum = maximum.toLocaleString();
+        stat.average = (
+          numericValues.reduce((sum, value) => sum + value, 0) /
+          numericValues.length
+        ).toLocaleString(undefined, { maximumFractionDigits: 2 });
+      } else if (isDate) {
+        stat.minimum = populatedValues.reduce((current, value) =>
+          value < current ? value : current,
+        );
+        stat.maximum = populatedValues.reduce((current, value) =>
+          value > current ? value : current,
+        );
+      }
+      return stat;
+    });
+  }, [data, headers]);
+
+  const duplicateRows = useMemo(() => {
+    const seen = new Set<string>();
+    let duplicates = 0;
+    data.forEach((row) => {
+      const key = JSON.stringify(row);
+      if (seen.has(key)) duplicates += 1;
+      else seen.add(key);
+    });
+    return duplicates;
+  }, [data]);
+
+  const activeFilterCount = Object.values(columnFilters).filter(
+    (value) => value.trim() !== "",
+  ).length;
 
   const pageCount =
     pageSize === 0
@@ -143,7 +279,9 @@ export default function Home() {
   }, [expanded]);
 
   function loadText(text: string, name: string) {
-    const parsed = parseCSV(text.replace(/^\uFEFF/, ""));
+    const cleanText = text.replace(/^\uFEFF/, "");
+    const detected = detectDelimiter(cleanText);
+    const parsed = parseCSV(cleanText, detected.value);
     if (parsed.length === 0 || parsed[0].length === 0) {
       setError("We couldn’t find any rows in that file.");
       return;
@@ -153,6 +291,9 @@ export default function Home() {
     setQuery("");
     setSort(null);
     setHiddenColumns(new Set());
+    setColumnFilters({});
+    setDelimiterLabel(detected.label);
+    setShowInsights(false);
     setPage(1);
     setError("");
   }
@@ -219,6 +360,8 @@ export default function Home() {
     setQuery("");
     setSort(null);
     setHiddenColumns(new Set());
+    setColumnFilters({});
+    setShowInsights(false);
     setPage(1);
     setError("");
   }
@@ -406,7 +549,8 @@ export default function Home() {
               <h1>{fileName}</h1>
               <p>
                 {data.length.toLocaleString()} rows ·{" "}
-                {headers.length.toLocaleString()} columns
+                {headers.length.toLocaleString()} columns · {delimiterLabel}{" "}
+                delimiter
               </p>
             </div>
             <div className="viewer-actions">
@@ -445,6 +589,23 @@ export default function Home() {
                 Showing <strong>{filteredRows.length.toLocaleString()}</strong>{" "}
                 of {data.length.toLocaleString()} rows
               </p>
+              {activeFilterCount > 0 && (
+                <button
+                  className="clear-filters"
+                  onClick={() => setColumnFilters({})}
+                >
+                  Clear {activeFilterCount}{" "}
+                  {activeFilterCount === 1 ? "filter" : "filters"}
+                </button>
+              )}
+              <button
+                className={`insights-button ${showInsights ? "is-active" : ""}`}
+                onClick={() => setShowInsights((value) => !value)}
+                aria-pressed={showInsights}
+              >
+                <span aria-hidden="true">◫</span>
+                Data profile
+              </button>
               <details className="columns-menu">
                 <summary>
                   <span aria-hidden="true">▥</span>
@@ -475,6 +636,71 @@ export default function Home() {
             </div>
           </div>
 
+          {showInsights && (
+            <section className="insights-panel" aria-labelledby="profile-heading">
+              <div className="insights-heading">
+                <div>
+                  <p className="eyebrow">DATA QUALITY</p>
+                  <h2 id="profile-heading">Column profile</h2>
+                </div>
+                <div className="quality-summary">
+                  <span>
+                    <strong>{data.length.toLocaleString()}</strong> rows
+                  </span>
+                  <span>
+                    <strong>{headers.length.toLocaleString()}</strong> columns
+                  </span>
+                  <span className={duplicateRows > 0 ? "has-warning" : ""}>
+                    <strong>{duplicateRows.toLocaleString()}</strong> duplicate{" "}
+                    {duplicateRows === 1 ? "row" : "rows"}
+                  </span>
+                </div>
+              </div>
+              <div className="stat-grid">
+                {columnStats.map((stat) => (
+                  <article key={`${stat.name}-${stat.index}`}>
+                    <div>
+                      <h3 title={stat.name}>{stat.name}</h3>
+                      <span className={`type-badge type-${stat.type.toLowerCase()}`}>
+                        {stat.type}
+                      </span>
+                    </div>
+                    <dl>
+                      <div>
+                        <dt>Unique</dt>
+                        <dd>{stat.unique.toLocaleString()}</dd>
+                      </div>
+                      <div>
+                        <dt>Missing</dt>
+                        <dd className={stat.missing > 0 ? "has-warning" : ""}>
+                          {stat.missing.toLocaleString()}
+                        </dd>
+                      </div>
+                      {stat.minimum !== undefined && (
+                        <div>
+                          <dt>Min</dt>
+                          <dd title={stat.minimum}>{stat.minimum}</dd>
+                        </div>
+                      )}
+                      {stat.maximum !== undefined && (
+                        <div>
+                          <dt>Max</dt>
+                          <dd title={stat.maximum}>{stat.maximum}</dd>
+                        </div>
+                      )}
+                      {stat.average !== undefined && (
+                        <div>
+                          <dt>Average</dt>
+                          <dd>{stat.average}</dd>
+                        </div>
+                      )}
+                    </dl>
+                  </article>
+                ))}
+              </div>
+            </section>
+          )}
+
           <div className="table-shell">
             <table>
               <thead>
@@ -497,6 +723,32 @@ export default function Home() {
                             : "↕"}
                         </span>
                       </button>
+                    </th>
+                  ))}
+                </tr>
+                <tr className="filter-row">
+                  <th className="row-number" aria-label="Column filters">
+                    {activeFilterCount > 0 ? "●" : ""}
+                  </th>
+                  {visibleColumns.map(({ header, index }) => (
+                    <th key={`filter-${header}-${index}`}>
+                      <label>
+                        <span className="sr-only">
+                          Filter {header || `Column ${index + 1}`}
+                        </span>
+                        <input
+                          value={columnFilters[index] ?? ""}
+                          onChange={(event) => {
+                            const value = event.target.value;
+                            setColumnFilters((current) => ({
+                              ...current,
+                              [index]: value,
+                            }));
+                            setPage(1);
+                          }}
+                          placeholder="Filter…"
+                        />
+                      </label>
                     </th>
                   ))}
                 </tr>
