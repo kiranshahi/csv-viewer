@@ -571,6 +571,13 @@ export default function Home() {
   function moveColumn(from: number, to: number) {
     if (from === to) return;
 
+    function movedIndex(index: number) {
+      if (index === from) return to;
+      if (from < to && index > from && index <= to) return index - 1;
+      if (from > to && index >= to && index < from) return index + 1;
+      return index;
+    }
+
     setRows((current) =>
       current.map((row) => {
         const next = Array.from(
@@ -584,7 +591,9 @@ export default function Home() {
     );
     setSort(null);
     setColumnFilters({});
-    setHiddenColumns(new Set());
+    setHiddenColumns(
+      (current) => new Set([...current].map((index) => movedIndex(index))),
+    );
     setEditingCell(null);
     setUndoStack([]);
     setRedoStack([]);
