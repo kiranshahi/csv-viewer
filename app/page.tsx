@@ -188,8 +188,8 @@ export default function Home() {
   const [error, setError] = useState("");
   const [expanded, setExpanded] = useState(false);
   const [hiddenColumns, setHiddenColumns] = useState<Set<number>>(new Set());
-  const [moveColumnFrom, setMoveColumnFrom] = useState(1);
-  const [moveColumnTo, setMoveColumnTo] = useState(1);
+  const [draggingColumn, setDraggingColumn] = useState<number | null>(null);
+  const [columnDropTarget, setColumnDropTarget] = useState<number | null>(null);
   const [columnFilters, setColumnFilters] = useState<Record<number, ColumnFilter>>({});
   const [delimiterLabel, setDelimiterLabel] = useState("Comma");
   const [showInsights, setShowInsights] = useState(false);
@@ -466,8 +466,8 @@ export default function Home() {
     setQuery("");
     setSort(null);
     setHiddenColumns(new Set());
-    setMoveColumnFrom(1);
-    setMoveColumnTo(1);
+    setDraggingColumn(null);
+    setColumnDropTarget(null);
     setColumnFilters({});
     setDelimiterLabel(detectedLabel);
     setShowInsights(false);
@@ -568,12 +568,7 @@ export default function Home() {
     });
   }
 
-  function moveColumn() {
-    if (headers.length < 2) return;
-    const from = Math.min(headers.length, Math.max(1, moveColumnFrom)) - 1;
-    const to = Math.min(headers.length, Math.max(1, moveColumnTo)) - 1;
-    setMoveColumnFrom(from + 1);
-    setMoveColumnTo(to + 1);
+  function moveColumn(from: number, to: number) {
     if (from === to) return;
 
     setRows((current) =>
@@ -594,6 +589,14 @@ export default function Home() {
     setUndoStack([]);
     setRedoStack([]);
     setPage(1);
+  }
+
+  function dropColumn(source: number, target: number) {
+    if (Number.isInteger(source) && source >= 0 && source < headers.length) {
+      moveColumn(source, target);
+    }
+    setDraggingColumn(null);
+    setColumnDropTarget(null);
   }
 
   function download(format: ExportFormat = exportFormat) {
@@ -1128,48 +1131,6 @@ export default function Home() {
                       </button>
                     )}
                   </div>
-                  {headers.length > 1 && (
-                    <div className="column-ordering">
-                      <strong>Change order</strong>
-                      <div>
-                        <label>
-                          From
-                          <input
-                            type="number"
-                            min={1}
-                            max={headers.length}
-                            value={moveColumnFrom}
-                            onChange={(event) =>
-                              setMoveColumnFrom(Number(event.target.value))
-                            }
-                            aria-label="Column position to move"
-                          />
-                        </label>
-                        <span aria-hidden="true">→</span>
-                        <label>
-                          To
-                          <input
-                            type="number"
-                            min={1}
-                            max={headers.length}
-                            value={moveColumnTo}
-                            onChange={(event) =>
-                              setMoveColumnTo(Number(event.target.value))
-                            }
-                            aria-label="New column position"
-                          />
-                        </label>
-                        <button
-                          type="button"
-                          onClick={moveColumn}
-                          disabled={moveColumnFrom === moveColumnTo}
-                        >
-                          Move
-                        </button>
-                      </div>
-                      <small>Positions run from 1 to {headers.length}.</small>
-                    </div>
-                  )}
                   {headers.map((header, index) => (
                     <label key={`${header}-${index}`}>
                       <input
@@ -1504,7 +1465,39 @@ export default function Home() {
                 <tr>
                   <th className="row-number">#</th>
                   {visibleColumns.map(({ header, index }) => (
-                    <th key={`${header}-${index}`}>
+                    <th
+                      key={`${header}-${index}`}
+                      draggable
+                      className={`draggable-header ${
+                        draggingColumn === index ? "is-dragging" : ""
+                      } ${
+                        columnDropTarget === index && draggingColumn !== index
+                          ? "is-drop-target"
+                          : ""
+                      }`}
+                      onDragStart={(event) => {
+                        setDraggingColumn(index);
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", String(index));
+                      }}
+                      onDragOver={(event) => {
+                        event.preventDefault();
+                        event.dataTransfer.dropEffect = "move";
+                        setColumnDropTarget(index);
+                      }}
+                      onDrop={(event) => {
+                        event.preventDefault();
+                        dropColumn(
+                          Number(event.dataTransfer.getData("text/plain")),
+                          index,
+                        );
+                      }}
+                      onDragEnd={() => {
+                        setDraggingColumn(null);
+                        setColumnDropTarget(null);
+                      }}
+                      title="Drag to change column order"
+                    >
                       <button onClick={() => changeSort(index)}>
                         {header || `Column ${index + 1}`}
                         <span
